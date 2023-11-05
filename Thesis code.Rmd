@@ -1,0 +1,820 @@
+---
+title: "Thesis code"
+author: "Hassan Aziz"
+date: "2023-10-29"
+output: html_document
+---
+
+## Loading Packages
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gplots)
+library(dplyr)
+library(arsenal)
+library(knitr) 
+library(stargazer)
+library(effects)
+library(readxl)
+library(reshape2)
+library(plm)
+library(glmnet)
+library(scales)
+library(lmtest)
+library(urca)
+library(forecast)
+library(tseries)
+library(systemfit)
+library(writexl)
+library(janitor)
+library(sandwich)
+library(broom)
+library(WDI)
+library(table1)
+library(printr)
+options(scipen = 999)  
+```
+
+## WDI data
+### Load the dataset
+```{r}
+wdi <- read_excel("P_Data_Extract_From_World_Development_Indicators-9.xlsx")
+
+```
+### Clean the dataset
+```{r}
+### Rename variables
+names(wdi)[names(wdi) == "Country Name"] <- "country"
+names(wdi)[names(wdi) == "Country Code"] <- "country_code"
+names(wdi)[names(wdi) == "Series Name"] <- "series"
+
+# Drop irrelevant variables
+wdi$`Series Code` <- NULL
+
+# Remove everything after the first space from column names using sub()
+colnames(wdi) <- sub(" .*", "", colnames(wdi))
+
+# Define the columns you want to exclude from conversion
+columns_to_exclude <- c("country", "country_code", "series")
+
+# Get the names of columns to convert (all except those in columns_to_exclude)
+columns_to_convert <- setdiff(names(wdi), columns_to_exclude)
+
+# Convert all columns except the specified ones to numeric
+wdi[columns_to_convert] <- lapply(wdi[columns_to_convert], as.numeric)
+
+# Change data from wide to long
+wdi_long <- wdi %>%
+  pivot_longer(cols = -c(country, country_code, series), 
+               names_to = "Year",
+               values_to = "Value")
+
+# remove missing values
+wdi_long <- na.omit(wdi_long)
+
+# Change data from long back to wide
+wdi_wide <- wdi_long %>%
+  spread(key = series, value = Value)
+
+names(wdi_wide)[names(wdi_wide) == "Year"] <- "year"
+wdi_wide$year <- as.numeric(wdi_wide$year)
+```
+
+## Our World Data
+### Loading and cleaning the dataset
+```{r}
+primary_energy <-read.csv("primary-energy-cons.csv")
+emissions <- read.csv("annual-co2-emissions-per-country.csv")
+temp <- merge(primary_energy, emissions, by = c("Entity", "Code", "Year"), all = FALSE)
+names(temp)[names(temp) == "Primary.energy.consumption..TWh."] <- "energy_consumption(TWh)"
+names(temp)[names(temp) == "Annual.CO..emissions"] <- "co2_emissions_our_world"
+names(temp)[names(temp) == "Entity"] <- "country"
+names(temp)[names(temp) == "Code"] <- "country_code"
+names(temp)[names(temp) == "Year"] <- "year"
+```
+### Merging the two datasets
+```{r}
+co2 <- merge(wdi_wide, temp, by = c("country", "country_code", "year"), all = FALSE)
+co2$country_code <- NULL
+```
+
+### Scaling the data
+```{r}
+co2$year <- as.numeric(co2$year)
+## Log transformations
+co2$lnCO2_wdi <- log(co2$`CO2 emissions (kt)`)
+co2$lnCO2 <- log(co2$co2_emissions_our_world)
+
+co2$ln_forest <- log(co2$`Forest area (sq. km)`)
+co2$ln_agri <- log(co2$`Cereal production (metric tons)`)
+co2$lnGDP <- log(co2$`GDP (constant 2015 US$)`)
+co2$ln_population <- log(co2$`Population, total`)
+co2$ln_urban <- log(co2$`Urban population (% of total population)`)
+co2$ln_energy <- log(co2$`energy_consumption(TWh)`)
+co2$gross_cap_by_gdp <- ((co2$`Gross fixed capital formation (constant 2015 US$)`)/(co2$`GDP (constant 2015 US$)`))*100
+co2$ln_capital <- log(co2$gross_cap_by_gdp)
+co2$ln_fossil <- log(co2$`Fossil fuel energy consumption (% of total)`)
+co2$lnGDPsq <- log((co2$`GDP (constant 2015 US$)`)^2)
+```
+
+## Cleaning and tests
+### Creating four datasets
+```{r}
+co2 <- co2[, !names(co2) %in% "Foreign direct investment, net (BoP, current US$)"]
+# 
+# # Without Nepal but with all factors including GFCF
+# sann <- co2[co2$country != "Nepal", ]
+# sann <- na.omit(sann)
+
+# All South Asia but without GFCF
+sanog <- co2[, !names(co2) %in% "gross_cap_by_gdp"]
+sanog <- sanog[, !names(sanog) %in% "ln_capital"]
+sanog <- sanog[, !names(sanog) %in% "Gross fixed capital formation (constant 2015 US$)"]
+sanog <- na.omit(sanog)
+
+# # All South Asia but without GFCF and Fossil Fuel
+# sanf <- co2[, !names(co2) %in% "gross_cap_by_gdp"]
+# sanf <- sanf[, !names(sanf) %in% "ln_capital"]
+# sanf <- sanf[, !names(sanf) %in% "Gross fixed capital formation (constant 2015 US$)"]
+# sanf <- sanf[, !names(sanf) %in% "Fossil fuel energy consumption (% of total)"]
+# sanf <- sanf[, !names(sanf) %in% "ln_fossil"]
+# sanf <- na.omit(sanf)
+# 
+# # All factors except Fossil fuel, no nepal
+# sann_nof <- co2[co2$country != "Nepal", ]
+# sann_nof <- sann_nof[, !names(sann_nof) %in% "Fossil fuel energy consumption (% of total)"]
+# sann_nof <- sann_nof[, !names(sann_nof) %in% "ln_fossil"]
+# sann_nof <- na.omit(sann_nof)
+```
+
+### Creating panel data
+```{r}
+panel_co2 <- pdata.frame(co2, index = c("country", "year"))
+panel_co2 <- na.omit(panel_co2)
+
+# All South Asia but without GFCF
+sanog <- pdata.frame(sanog, index = c("country", "year"))
+# Without Nepal but with all factors including GFCF
+# sann <- pdata.frame(sann, index = c("country", "year"))
+# # All South Asia but without GFCF and Fossil Fuel
+# sanf <- pdata.frame(sanf, index = c("country", "year"))
+# # All factors except Fossil fuel, no nepal
+# sann_nof <- pdata.frame(sann_nof, index = c("country", "year"))
+```
+### Root Unit tests
+#### ADF tests
+```{r}
+adf.test(sanog_differenced$ln_forest, k=2)
+#"ln_agri", "lnGDP", "ln_energy", "lnCO2", "lnCO2_wdi"
+#ln_population, ln_urban, ln_forest
+```
+The ADF test shows all variables are non-stationary, thus we first-order difference the variables to make them stationary
+#### Im, Pesaran, and Shin (IPS) test
+```{r}
+purtest(lnCO2 ~ 1, data = sanog, test = "ips", model = "pooling", lags = 2)  # Change the number of lags as needed
+
+# Perform the KPSS test for a specific variable
+kpss.test(sanog$ln_forest, null = "Trend")
+
+# Print the test result
+cat("KPSS Test Statistic:", kpss_result$statistic, "\n")
+cat("P-value:", kpss_result$p.value, "\n")
+```
+
+### Creating a differenced panel dataset
+Following variables are stationary after one differencing: ln_agri, lnGDP, ln_energy, lnCO2, lnCO2_wdi.
+ln_population, ln_urban, ln_forest are stationary after second order differencing
+
+Dependent variables:lnCO2_wdi, lnCO2
+Independent variables: ln_forest, ln_agri, lnGDP, ln_population, ln_urban, ln_energy
+#### SANOG - All South Asia but without GFCF
+```{r}
+sanog_differenced_vars <- setdiff(names(sanog), c("year", "country"))
+# panel_co2$Fossil.fuel.energy.consumption....of.total. <- NULL
+# Perform first-order differencing for selected variables
+sanog_differenced <- sanog %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sanog_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sanog_differenced <- na.omit(sanog_differenced)
+
+sanog_differenced_vars2 <- setdiff(names(sanog), c("year", "country", "ln_agri", "lnGDP", "lnGDPsq", "ln_fossil", "ln_energy", "lnCO2", "lnCO2_wdi"))
+
+# Perform second-order differencing for selected variables
+sanog_differenced2 <- sanog_differenced %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sanog_differenced_vars2), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sanog_differenced2 <- na.omit(sanog_differenced2)
+sanog_panel <- pdata.frame(sanog_differenced2, index = c("country", "year"))
+```
+
+#### SANN - Without Nepal but with all factors including GFCF
+```{r}
+sann_differenced_vars <- setdiff(names(sann), c("year", "country"))
+# panel_co2$Fossil.fuel.energy.consumption....of.total. <- NULL
+# Perform first-order differencing for selected variables
+sann_differenced <- sann %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sann_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sann_differenced <- na.omit(sann_differenced)
+
+sann_differenced_vars2 <- setdiff(names(sann), c("year", "country", "ln_agri", "lnGDP", "ln_fossil", "ln_energy", "lnCO2", "lnCO2_wdi"))
+
+# Perform second-order differencing for selected variables
+sann_differenced2 <- sann_differenced %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sann_differenced_vars2), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sann_differenced2 <- na.omit(sann_differenced2)
+sann_panel <- pdata.frame(sann_differenced2, index = c("country", "year"))
+```
+#### SANF - All South Asia but without GFCF and Fossil Fuel
+```{r}
+sanf_differenced_vars <- setdiff(names(sanf), c("year", "country"))
+# panel_co2$Fossil.fuel.energy.consumption....of.total. <- NULL
+# Perform first-order differencing for selected variables
+sanf_differenced <- sanf %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sanf_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sanf_differenced <- na.omit(sanf_differenced)
+
+sanf_differenced_vars2 <- setdiff(names(sanf), c("year", "country", "ln_agri", "lnGDP", "ln_energy", "lnCO2", "lnCO2_wdi"))
+
+# Perform second-order differencing for selected variables
+sanf_differenced2 <- sanf_differenced %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sanf_differenced_vars2), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sanf_differenced2 <- na.omit(sanf_differenced2)
+sanf_panel <- pdata.frame(sanf_differenced2, index = c("country", "year"))
+```
+#### SANN_NOF - All factors except Fossil fuel, no nepal
+```{r}
+sann_nof_differenced_vars <- setdiff(names(sann_nof), c("year", "country"))
+# panel_co2$Fossil.fuel.energy.consumption....of.total. <- NULL
+# Perform first-order differencing for selected variables
+sann_nof_differenced <- sann_nof %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sann_nof_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sann_nof_differenced <- na.omit(sann_nof_differenced)
+
+sann_nof_differenced_vars2 <- setdiff(names(sann_nof), c("year", "country", "ln_agri", "lnGDP", "ln_energy", "lnCO2", "lnCO2_wdi", "ln_capital"))
+
+# Perform second-order differencing for selected variables
+sann_nof_differenced2 <- sann_nof_differenced %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(sann_nof_differenced_vars2), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+sann_nof_differenced2 <- na.omit(sann_nof_differenced2)
+sann_nof_panel <- pdata.frame(sann_nof_differenced2, index = c("country", "year"))
+```
+
+## Multicollinearity tests
+### Checking multicollinearity - SANOG
+```{r}
+correlation_matrix_sanog <- cor(sanog_panel[, c("lnGDP", "ln_urban", "ln_population","ln_energy", "ln_fossil","ln_agri", "ln_forest")])
+correlation_matrix_co2 <- cor(sanog_panel[, c("lnCO2", "lnCO2_wdi")])
+high_correlations <- which(correlation_matrix_sanog > 0.5 & correlation_matrix_sanog < 0.7, arr.ind = TRUE)
+very_high_correlations <- which(correlation_matrix_sanog > 0.7 & correlation_matrix_sanog < 1, arr.ind = TRUE)
+
+# Extract variable pairs
+variable_pairs <- data.frame(
+  Variable1 = rownames(correlation_matrix_sanog)[high_correlations[, 1]],
+  Variable2 = colnames(correlation_matrix_sanog)[high_correlations[, 2]]
+  )
+# Extract variable pairs
+variable_pairs_high <- data.frame(
+  Variable1 = rownames(correlation_matrix_sanog)[very_high_correlations[, 1]],
+  Variable2 = colnames(correlation_matrix_sanog)[very_high_correlations[, 2]]
+  )
+# Examine the variable pairs
+print(variable_pairs)
+print(variable_pairs_high)
+heatmap(correlation_matrix_sanog)
+
+sanog_panel$GDP <- sanog_panel$lnGDP
+sanog_panel$GDP_sq <- (sanog_panel$GDP)^2
+sanog_panel$Urbanization <- sanog_panel$ln_urban
+sanog_panel$Population <- sanog_panel$ln_population
+sanog_panel$`Energy consumption` <- sanog_panel$ln_energy
+sanog_panel$`Fossil fuel share` <- sanog_panel$ln_fossil
+sanog_panel$`Agricultural production` <- sanog_panel$ln_agri
+sanog_panel$`Forest area` <- sanog_panel$ln_forest
+sanog_panel$`Energy use` <- sanog_panel$`Energy consumption`
+sanog_panel$`Fossil fuel` <- sanog_panel$`Fossil fuel share`
+sanog_panel$Forest <- sanog_panel$`Forest area`
+sanog_panel$Agriculture <- sanog_panel$`Agricultural production`
+sanog_panel$CO2 <- sanog_panel$lnCO2_wdi
+sanog_panel$`CO2(GCB)` <- sanog_panel$lnCO2
+
+
+correlation_matrix_sanog <- cor(sanog_panel[, c("GDP", "Urbanization", "Population", "Energy use" , "Fossil fuel", "Agriculture", "Forest")])
+my_palette <- colorRampPalette(c("blue", "white", "red"))(50)
+
+# Create the heatmap with custom settings
+
+heatmap(
+  correlation_matrix_sanog,
+  main = "Correlation Heatmap",  # Main title
+  margins = c(7, 7),          # Adjust margins
+  cex.main = 0.8,               # Main title font size
+  cex.axis = 0.8,               # Axis label font size
+  cex.lab = 0.8,                # Variable labels font size
+  symm = FALSE                   # Display a symmetric heatmap
+)
+
+colnames(sanog_panel)
+correlation_matrix_sanog
+```
+
+### Checking multicollinearity - SANN
+```{r}
+correlation_matrix_sann <- cor(sann_panel[, c("ln_agri", "lnGDP", "ln_energy", "ln_population" , "ln_urban", "ln_forest", "ln_fossil", "ln_capital")])
+
+heatmap(correlation_matrix_sann)
+```
+### Checking multicollinearity - SANF
+```{r}
+correlation_matrix_sanf <- cor(sanf_panel[, c("ln_agri", "lnGDP", "ln_energy", "ln_population" , "ln_urban", "ln_forest")])
+heatmap(correlation_matrix_sanf)
+```
+
+### Checking multicollinearity - SANF
+```{r}
+correlation_matrix_sann_nof <- cor(sann_nof_panel[, c("ln_agri", "lnGDP", "ln_capital", "ln_population" , "ln_urban", "ln_forest")])
+heatmap(correlation_matrix_sann_nof)
+```
+
+
+### Pooled OLS test 
+```{r}
+sanog
+
+pooltest(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil, data = sanog_panel, model = "within")
+## The pool test shows that the pooled data in unstable. We can't do pooled OLS regression
+```
+# Regressions
+## SANOG
+### Pooled effect - sanog
+```{r}
+pool_sanog <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,data = sanog_panel, model = "pooling")
+summary(pool_sanog)
+```
+
+### Fixed effect - sanog
+```{r}
+fesanog <- plm(lnCO2_wdi ~ lnGDP + ln_urban + ln_population + ln_energy + ln_fossil + ln_agri + ln_forest,
+               data = sanog_panel,model = "within")
+summary(fesanog)
+coeftest(fesanog, vcovHC(fesanog, method = "arellano"))
+
+fesanog_gcb <- plm(lnCO2 ~ lnGDP + ln_urban + ln_population + ln_energy + ln_fossil + ln_agri + ln_forest,
+               data = sanog_panel,model = "within")
+coeftest(fesanog_gcb, vcovHC(fesanog_gcb, method = "arellano"))
+```
+### Random effect - sanog
+```{r}
+resanog <-  plm(lnCO2_wdi ~ lnGDP + ln_urban + ln_population + ln_energy + ln_fossil + ln_agri + ln_forest, data = sanog_panel, model = "random", random.method = "walhus")
+coeftest(resanog, vcovHC(resanog, method = "arellano"))
+
+resanog_gcb <- plm(lnCO2 ~ lnGDP + ln_urban + ln_population + ln_energy + ln_fossil + ln_agri + ln_forest,data = sanog_panel, model = "random", random.method = "walhus")
+coeftest(resanog_gcb, vcovHC(resanog_gcb, method = "arellano"))
+```
+
+## SANN
+### Fixed effect - sann
+```{r}
+fesann <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil + ln_capital,
+                           data = sann_panel,
+                           model = "within"
+                           )
+summary(fesann)
+```
+### Random effect - sann
+```{r}
+resann <-  plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil + ln_capital,
+                 data = sann_panel, model = "random", random.method = "walhus")
+summary(resann)
+```
+
+## SANF
+### Fixed effect - sanf
+```{r}
+fesanf <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest,
+                           data = sann_panel,model = "within")
+summary(fesanf)
+```
+### Random effect - sanf
+```{r}
+resanf <-  plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest,
+                 data = sann_panel, model = "random", random.method = "walhus")
+summary(resanf)
+```
+## SANN_NOF
+### Fixed effect - sann_nof
+```{r}
+fesann_nof <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_capital,
+                           data = sann_nof_panel,model = "within")
+summary(fesann_nof)
+```
+### Random effect - sann_nof
+```{r}
+resann_nof <-  plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_capital,
+                 data = sann_nof_panel, model = "random", random.method = "walhus")
+summary(resann_nof)
+```
+
+# Tests
+### Pooled vs Fixed
+```{r}
+pooltest(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+         data = sanog_panel, model = "within")
+
+pFtest(fesanog, pool_sanog)
+```
+Pooled OLS model works in this case
+### Test for individual and time effect in panel data
+```{r}
+plmtest(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+        data = sanog_panel, effect = "twoways", type = "ghm")
+```
+No significant individual and time effects
+### Hausman test
+```{r}
+phtest(fesanog, resanog)
+```
+
+### Autocorrelation test
+```{r}
+bgtest(resanog)
+bgtest(resanf)
+bgtest(resann)
+bgtest(resann_nof)
+```
+### Heteroskasdicity test
+```{r}
+bptest(lnCO2 ~ lnGDP + ln_agri + ln_population + ln_urban + ln_energy_consumption,
+       data = sanog_panel, studentize = F)
+```
+### Robust Regression coefficients
+```{r}
+fesanog_robust <- coeftest(fesanog, vcovHC(fesanog, method = "arellano"))
+resanog_robust <- coeftest(resanog, vcovHC(resanog, method = "arellano"))
+
+fesanog_robust_gcb <- coeftest(fesanog_gcb, vcovHC(fesanog_gcb, method = "arellano"))
+resanog_robust_gcb <- coeftest(resanog_gcb, vcovHC(resanog_gcb, method = "arellano"))
+
+# Saving standard errors
+resanog_se <- coeftest(resanog, vcov.=vcovHC(resanog, method = c("arellano")))
+fesanog_se <- coeftest(fesanog, vcov.=vcovHC(fesanog, method = c("arellano")))
+
+resanog_gcb_se <- coeftest(resanog_gcb, vcov.=vcovHC(resanog_gcb, method = c("arellano")))
+fesanog_gcb_se <- coeftest(fesanog_gcb, vcov.=vcovHC(fesanog_gcb, method = c("arellano")))
+```
+
+### Robust regression graph
+```{r}
+betas <- coef(resanog_robust)[-1]
+cis <- confint(resanog_robust)
+
+plot(betas, xlab = "" , main = "RE model (Data source: WDI)", ylab = "β Coefficients", xaxt = "n", pch = 1, ylim = c(-15, 15))
+axis(1, at = c(1,2,3,4,5,6,7),
+     labels = c("GDP", "Urban \n population", "Total \n population", "Energy \n consumption", "Fossil Fuel \n Share", "Agriculture \n Production", "Forest \n area"),
+     cex.axis = 0.8)
+lines(c(1,1), c(cis[2,1],cis[2,2]))
+lines(c(2,2), c(cis[3,1],cis[3,2]))
+lines(c(3,3), c(cis[4,1],cis[4,2]))
+lines(c(4,4), c(cis[5,1],cis[5,2]))
+lines(c(5,5), c(cis[6,1],cis[6,2]))
+lines(c(6,6), c(cis[7,1],cis[7,2]))
+lines(c(7,7), c(cis[8,1],cis[8,2]))
+abline(h=0, lty = 2)
+
+betas_fesanog_robust <- coef(fesanog_robust)[-1]
+cis_fesanog_robust <- confint(fesanog_robust)
+
+plot(betas, xlab = "" , main = "FE model (Data source: WDI)", ylab = "β Coefficients", xaxt = "n", pch = 1, ylim = c(-15, 15))
+axis(1, at = c(1,2,3,4,5,6,7),
+     labels = c("GDP", "Urban \n population", "Total \n population", "Energy \n consumption", "Fossil Fuel \n Share", "Agriculture \n Production", "Forest \n area"),
+     cex.axis = 0.8)
+lines(c(1,1), c(cis[2,1],cis[2,2]))
+lines(c(2,2), c(cis[3,1],cis[3,2]))
+lines(c(3,3), c(cis[4,1],cis[4,2]))
+lines(c(4,4), c(cis[5,1],cis[5,2]))
+lines(c(5,5), c(cis[6,1],cis[6,2]))
+lines(c(6,6), c(cis[7,1],cis[7,2]))
+lines(c(7,7), c(cis[8,1],cis[8,2]))
+abline(h=0, lty = 2)
+
+betas_fesanog_robust_gcb <- coef(fesanog_robust_gcb)[-1]
+cis_fesanog_robust <- confint(fesanog_robust_gcb)
+
+plot(betas, xlab = "" , main = "FE model (Data source: GCB)", ylab = "β Coefficients", xaxt = "n", pch = 1, ylim = c(-15, 15))
+axis(1, at = c(1,2,3,4,5,6,7),
+     labels = c("GDP", "Urban \n population", "Total \n population", "Energy \n consumption", "Fossil Fuel \n Share", "Agriculture \n Production", "Forest \n area"),
+     cex.axis = 0.8)
+lines(c(1,1), c(cis[2,1],cis[2,2]))
+lines(c(2,2), c(cis[3,1],cis[3,2]))
+lines(c(3,3), c(cis[4,1],cis[4,2]))
+lines(c(4,4), c(cis[5,1],cis[5,2]))
+lines(c(5,5), c(cis[6,1],cis[6,2]))
+lines(c(6,6), c(cis[7,1],cis[7,2]))
+lines(c(7,7), c(cis[8,1],cis[8,2]))
+abline(h=0, lty = 2)
+
+betas_resanog_robust_gcb <- coef(resanog_robust_gcb)[-1]
+cis_resanog_robust <- confint(resanog_robust_gcb)
+
+plot(betas, xlab = "" , main = "FE model (Data source: GCB)", ylab = "β Coefficients", xaxt = "n", pch = 1, ylim = c(-15, 15))
+axis(1, at = c(1,2,3,4,5,6,7),
+     labels = c("GDP", "Urban \n population", "Total \n population", "Energy \n consumption", "Fossil Fuel \n Share", "Agriculture \n Production", "Forest \n area"),
+     cex.axis = 0.8)
+lines(c(1,1), c(cis[2,1],cis[2,2]))
+lines(c(2,2), c(cis[3,1],cis[3,2]))
+lines(c(3,3), c(cis[4,1],cis[4,2]))
+lines(c(4,4), c(cis[5,1],cis[5,2]))
+lines(c(5,5), c(cis[6,1],cis[6,2]))
+lines(c(6,6), c(cis[7,1],cis[7,2]))
+lines(c(7,7), c(cis[8,1],cis[8,2]))
+abline(h=0, lty = 2)
+
+```
+
+# LSDV model
+```{r}
+dummy <-lm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil +
+                factor(country)-1, data = sanog_panel)
+summary(dummy)
+```
+# Seemingly Unrelated Regression (SUR)
+```{r}
+sur_re <- systemfit(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+                    method = "SUR", data = sanog_panel)
+summary(sur_re)
+```
+# Print the regression table with robust std errors
+```{r}
+stargazer(resanog, type = "latex", title = "Regression Results", 
+          align = TRUE, single.row = TRUE, se = list(vcovHC(resanog, type = "arellano")), out = "regression_table.html")
+
+# Create labels for each model
+model_labels <- c("Fixed effects", "Random effects")
+
+resanog_gcb <- plm(lnCO2 ~ lnGDP + ln_urban + ln_population + ln_energy + ln_fossil + ln_agri + ln_forest,data = sanog_panel, model = "random", random.method = "walhus")
+
+# Use stargazer to generate a table with three models side by side
+stargazer(
+  fesanog, resanog,
+  type = "latex",
+  title = "Regression results",
+  align = TRUE,
+  dep.var.labels=c("CO2 emissions"), covariate.labels=c("GDP","Urbanization", "Population","Energy Consumption","Fossil fuel", "Agriculture","Forest area"),
+  omit.stat=c("LL","ser","f"),
+  se = list((fesanog_se[,2]),
+            (resanog_se[,2])),
+  column.labels = model_labels,
+  out = "regression_table.tex")
+
+
+# Use stargazer to generate a table with three models side by side
+stargazer(
+  fesanog_gcb, resanog_gcb,
+  type = "latex",
+  title = "Regression results",
+  align = TRUE,
+  dep.var.labels=c("CO2 emissions"), covariate.labels=c("GDP","Urbanization", "Population","Energy Consumption","Fossil fuel", "Agriculture","Forest area"),
+  omit.stat=c("LL","ser","f"),
+  se = list((fesanog_se[,2]),
+            (resanog_se[,2])),
+  column.labels = model_labels,
+  out = "regression_table_gcb.tex")
+
+stargazer(correlation_matrix_sanog)
+```
+
+# Experiment 
+```{r}
+co2_exp <- co2 %>%
+  select(country, year, `Fossil fuel energy consumption (% of total)`, `GDP (constant 2015 US$)`, `Population, total`, `Urban population (% of total population)`, `energy_consumption(TWh)`, `co2_emissions_our_world`, `Cereal production (metric tons)`)
+
+co2_exp$lnCO2 <- log(co2_exp$`co2_emissions_our_world`)
+co2_exp$ln_agri <- log(co2_exp$`Cereal production (metric tons)`)
+co2_exp$lnGDP <- log(co2_exp$`GDP (constant 2015 US$)`)
+co2_exp$ln_population <- log(co2_exp$`Population, total`)
+co2_exp$ln_urban <- log(co2_exp$`Urban population (% of total population)`)
+co2_exp$ln_energy <- log(co2_exp$`energy_consumption(TWh)`)
+co2_exp$ln_fossil <- log(co2_exp$`Fossil fuel energy consumption (% of total)`)
+
+co2_exp <- co2_exp %>%
+  select(country, year, lnCO2, lnGDP, ln_population, ln_urban, ln_energy, ln_agri, ln_fossil)
+
+co2_exp_differenced_vars <- setdiff(names(co2_exp), c("year", "country"))
+
+# Perform first-order differencing for selected variables
+co2_exp_dif <- co2_exp %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(co2_exp_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+co2_exp_dif <- na.omit(co2_exp_dif)
+
+co2_exp_differenced_vars2 
+
+# Perform second-order differencing for selected variables
+co2_exp_dif2 <- co2_exp_dif %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of("ln_population"), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+co2_exp_dif2 <- na.omit(co2_exp_dif2)
+
+co2_exp_dift1 <- co2_exp_dif2 %>%
+  filter(year < 2001)
+
+co2_exp_dift2 <- co2_exp_dif2 %>%
+  filter(year > 2000)
+
+co2_exp_panelt1 <- pdata.frame(co2_exp_dift1, index = c("country", "year"))
+co2_exp_panelt2 <- pdata.frame(co2_exp_dift2, index = c("country", "year"))
+co2_exp_panel <- pdata.frame(co2_exp_dif2, index = c("country", "year"))
+
+co2_exp_ret1 <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panelt1, model = "random", random.method = "walhus")
+coeftest(co2_exp_ret1, vcovHC(co2_exp_ret1, method = "arellano"))
+
+co2_exp_fet1 <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panelt1, model = "within")
+coeftest(co2_exp_fet1, vcovHC(co2_exp_fet1, method = "arellano"))
+
+co2_exp_ret2 <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panelt2, model = "random", random.method = "walhus")
+coeftest(co2_exp_ret2, vcovHC(co2_exp_ret2, method = "arellano"))
+
+co2_exp_fet2 <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panelt2, model = "within")
+coeftest(co2_exp_fet2, vcovHC(co2_exp_fet2, method = "arellano"))
+
+co2_exp_fe <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panel, model = "within")
+coeftest(co2_exp_fe, vcovHC(co2_exp_fe, method = "arellano"))
+
+co2_exp_re <- plm(lnCO2 ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_fossil,
+               data = co2_exp_panel, model = "random", random.method = "walhus")
+coeftest(co2_exp_re, vcovHC(co2_exp_re, method = "arellano"))
+```
+# Experiment 2
+```{r}
+co2_exp <- co2 %>%
+  select(country, year, `Fossil fuel energy consumption (% of total)`, `GDP (constant 2015 US$)`, `Population, total`, `Urban population (% of total population)`, `energy_consumption(TWh)`, `co2_emissions_our_world`, `Cereal production (metric tons)`)
+
+co2_exp$lnCO2 <- log(co2_exp$`co2_emissions_our_world`)
+co2_exp$ln_agri <- log(co2_exp$`Cereal production (metric tons)`)
+co2_exp$lnGDP <- log(co2_exp$`GDP (constant 2015 US$)`)
+co2_exp$ln_population <- log(co2_exp$`Population, total`)
+co2_exp$ln_urban <- log(co2_exp$`Urban population (% of total population)`)
+co2_exp$ln_energy <- log(co2_exp$`energy_consumption(TWh)`)
+co2_exp$ln_fossil <- log(co2_exp$`Fossil fuel energy consumption (% of total)`)
+
+co2_exp <- co2_exp %>%
+  select(country, year, lnCO2, lnGDP, ln_population, ln_urban, ln_energy, ln_agri, ln_fossil)
+
+co2_exp_differenced_vars <- setdiff(names(co2_exp), c("year", "country"))
+
+# Perform first-order differencing for selected variables
+co2_exp_dif <- co2_exp %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of(co2_exp_differenced_vars), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+co2_exp_dif <- na.omit(co2_exp_dif)
+
+co2_exp_differenced_vars2 
+
+# Perform second-order differencing for selected variables
+co2_exp_dif2 <- co2_exp_dif %>%
+  group_by(country) %>%  # Assuming you have a variable for country or entity
+  arrange(country, year) %>%  # Arrange by country and time
+  mutate(across(all_of("ln_population"), ~ c(NA, diff(.)))) %>%
+  ungroup()
+
+co2_exp_dif2 <- na.omit(co2_exp_dif2)
+
+co2_t2_panel <- pdata.frame(co2_t2, index = c("country", "year"))
+
+
+re_t1_exp <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t1, model = "random", random.method = "walhus")
+
+re_t2_exp <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t2, model = "random", random.method = "walhus")
+
+coeftest(re_t1_exp, vcovHC(re_t1_exp, method = "arellano"))
+coeftest(re_t2_exp, vcovHC(re_t2_exp, method = "arellano"))
+
+re_t1_pool <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t1, model = "pooling")
+
+re_t2_pool <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t2, model = "pooling")
+
+coeftest(re_t1_pool, vcovHC(re_t1_pool, method = "arellano"))
+coeftest(re_t2_pool, vcovHC(re_t2_pool, method = "arellano"))
+
+fe_t1 <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t1, model = "within")
+
+fe_t2 <- plm(lnCO2_wdi ~ ln_agri + lnGDP + ln_energy + ln_population + ln_urban + ln_forest + ln_fossil,
+               data = co2_t2, model = "within")
+
+coeftest(fe_t1, vcovHC(fe_t1, method = "arellano"))
+coeftest(fe_t2, vcovHC(fe_t2, method = "arellano"))
+```
+
+
+# Descriptive statistics
+```{r}
+sanog_2 <- sanog %>% 
+  group_by(country)
+
+sanog_2$`CO2 emissions (million ton)`  <- (sanog_2$`CO2 emissions (kt)`)/(10^3)
+sanog_2$`CO2 emissions (GCB)`  <- (sanog_2$co2_emissions_our_world)/(10^6)
+sanog_2$`Population (mil)`  <- (sanog_2$`Population, total`)/(10^6)
+sanog_2$`Agriculture production (mil metric tons)`  <- (sanog_2$`Cereal production (metric tons)`)/(10^6)
+sanog_2$`GDP (trillion)`  <- sanog_2$`GDP (constant 2015 US$)`/(10^9)
+
+
+table1::label(sanog_2$`energy_consumption(TWh)`) <- "Energy Consumption (TWh)"
+table1::label(sanog_2$`GDP (trillion)`) <- "GDP (USD trillion)"
+
+
+my_table <- table1::table1(~`CO2 emissions (million ton)` + `CO2 emissions (GCB)` + `GDP (trillion)` + `Urban population (% of total population)` + `Population (mil)` + `energy_consumption(TWh)` + `Fossil fuel energy consumption (% of total)` + `Agriculture production (mil metric tons)` + `Forest area (% of land area)` | country, data = sanog_2)
+
+latex_code <- latex_table(my_table)
+
+t1kable(my_table)
+# Save the table to a CSV file
+write.csv(my_table, file = "my_table.csv", row.names = FALSE)
+
+# Or, save the table to a text file
+write.table(my_table, file = "my_table.txt", sep = "\t", row.names = FALSE)
+
+```
+
+
+# Print the regression table with robust std errors
+```{r}
+stargazer(resanog, type = "latex", title = "Regression Results", 
+          align = TRUE, single.row = TRUE, se = list(vcovHC(resanog, type = "arellano")), out = "regression_table.html")
+
+# Create labels for each model
+model_labels <- c("FE model", "RE model")
+
+# Use stargazer to generate a table with three models side by side
+stargazer(
+  fesanog, resanog,
+  type = "html",
+  title = "Regression results",
+  align = TRUE,
+  single.row = TRUE,
+  se = list((fesanog_se[,2]),
+            (resanog_se[,2])),
+  column.labels = model_labels,
+  out = "regression_table.html")
+
+# Use stargazer to generate a table with three models side by side
+stargazer(
+  fesanog_gcb, resanog_gcb,
+  type = "html",
+  title = "Regression results",
+  align = TRUE,
+  single.row = TRUE,
+  se = list((fesanog_gcb_se[,2]),
+            (resanog_gcb_se[,2])),
+  column.labels = model_labels,
+  out = "regression_table_gcb.html")
+
+```
